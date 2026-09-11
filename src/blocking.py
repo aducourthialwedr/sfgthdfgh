@@ -187,10 +187,23 @@ def build_static_lookups(tables: dict[str, pd.DataFrame]) -> dict:
     # Un token présent dans un bucket géant n'est de toute façon pas
     # discriminant pour le blocking ; le laisser ferait dégénérer K4 en
     # comparaison quasi exhaustive à grande échelle.
+    # Sous-échantillonne les buckets trop gros plutôt que de les éliminer :
+    # avec un vocabulaire de noms peu diversifié relativement au volume
+    # (ex. données synthétiques à faible cardinalité), TOUS les tokens
+    # peuvent dépasser le seuil — un élagage pur et simple viderait alors
+    # l'index entièrement et K4 ne trouverait plus jamais rien. Un
+    # sous-échantillonnage déterministe garde toujours une chance de
+    # matcher, même pour un token très fréquent.
     max_bucket_size = max(_NAME_INDEX_MIN_BUCKET, len(debtor_name_tokens) // _NAME_INDEX_MAX_BUCKET_FRACTION)
-    name_index = {
-        token: ids for token, ids in name_index.items() if len(ids) <= max_bucket_size
-    }
+    pruned_index: dict[str, set[str]] = {}
+    for token, ids in name_index.items():
+        if len(ids) <= max_bucket_size:
+            pruned_index[token] = ids
+        else:
+            sorted_ids = sorted(ids)
+            step = len(sorted_ids) / max_bucket_size
+            pruned_index[token] = {sorted_ids[int(i * step)] for i in range(max_bucket_size)}
+    name_index = pruned_index
 
     return dict(
         debtor_by_iban=debtor_by_iban,

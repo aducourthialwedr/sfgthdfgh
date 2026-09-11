@@ -109,6 +109,38 @@ _SURNAMES = [
     "ISAMBERT", "JANIN", "KELLER", "LACOMBE", "MAGNIN", "NAVARRE", "ORY", "OZENNE",
     "QUENTIN", "RAMBAUD", "SAUVAGE", "TARDIF", "URVOY", "VALOIS", "WEBER", "PAULIN",
 ]
+
+# Complète _SURNAMES par combinaison préfixe+suffixe (~48*48 = 2304
+# combinaisons) : la liste ci-dessus (173 entrées) est lisible pour des
+# démonstrations, mais bien trop peu diversifiée pour rester réaliste à
+# plusieurs millions de débiteurs — un token de nom serait alors partagé
+# par des milliers de débiteurs, et l'élagage dynamique des tokens trop
+# fréquents dans l'index K4 (§4, `blocking.build_static_lookups`) finirait
+# par tout éliminer, désactivant K4 de fait. Un vrai référentiel de noms a
+# une cardinalité bien plus grande ; cette combinatoire l'approche sans
+# maintenir des dizaines de milliers de noms à la main.
+_SURNAME_PREFIXES = [
+    "MAR", "BER", "DUB", "THO", "ROB", "PET", "DUR", "LER", "MOR", "SIM",
+    "LAU", "LEF", "MIC", "GAR", "DAV", "BOU", "ROU", "VIN", "FON", "CHE",
+    "GAU", "MAS", "DUP", "LAM", "BON", "FRA", "LEG", "FAU", "AND", "MER",
+    "BLA", "GUE", "BOY", "CLE", "MEY", "GIR", "MOL", "MUL", "COL", "NOE",
+    "PER", "REN", "DEN", "DUM", "MARC", "DUF", "BRU", "PIC",
+]
+_SURNAME_SUFFIXES = [
+    "TIN", "NARD", "OIS", "MAS", "ERT", "IER", "URE", "AULT", "ANT", "ILLE",
+    "EAU", "OT", "AND", "ARD", "ETTE", "OU", "AUD", "ON", "ET", "IN",
+    "OY", "EY", "ARDIN", "EUIL", "IGNON", "UZE", "ONS", "AGNE", "ERIE", "ISSE",
+    "OUX", "UET", "INEAU", "ELLE", "ANCE", "ENSE", "ORT", "USSE", "IVET", "ONCE",
+    "ARY", "ENAY", "INOT", "OUARD", "ASSE", "ONDE", "URY", "ELIN",
+]
+_ALL_SURNAMES: np.ndarray = np.array(
+    list(_SURNAMES) + [f"{p}{s}" for p in _SURNAME_PREFIXES for s in _SURNAME_SUFFIXES]
+)
+# `rng.choice` sur une liste Python reconvertit en tableau à *chaque appel* :
+# coût caché négligeable une fois, mais rédhibitoire appelé ~n_debtors fois
+# (même piège que les autres correctifs de cette passe). Un tableau numpy
+# précalculé une seule fois évite cette reconversion répétée.
+
 _LEGAL_FORMS = ["SARL", "SAS", "SA", "EURL", "SNC", "SASU"]
 _SECTOR_WORDS = {
     "BTP": ["BATIMENT", "CONSTRUCTION", "TP", "RENOVATION"],
@@ -157,7 +189,7 @@ def _fake_iban(rng: np.random.Generator) -> str:
 
 
 def _fake_company_name(rng: np.random.Generator, market: Optional[str] = None) -> str:
-    surname = rng.choice(_SURNAMES)
+    surname = str(rng.choice(_ALL_SURNAMES))
     form = rng.choice(_LEGAL_FORMS)
     if market is not None and rng.random() < 0.6:
         word = rng.choice(_SECTOR_WORDS[market])
