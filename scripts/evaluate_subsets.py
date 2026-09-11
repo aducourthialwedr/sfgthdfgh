@@ -28,7 +28,7 @@ MODELS_DIR = Path("models")
 
 
 def load_tables(data_dir: Path) -> dict[str, pd.DataFrame]:
-    names = ["payment", "invoice", "imputation", "assignor", "debtor", "agreement", "ground_truth"]
+    names = ["payment", "invoice", "imputation", "assignor", "debtor", "agreement", "ground_truth", "_technical_ibans"]
     return {name: pd.read_parquet(data_dir / f"{name}.parquet") for name in names}
 
 
@@ -69,11 +69,7 @@ def main() -> None:
     payments = []
     for payment_id, cands in candidates_by_payment.items():
         raw = payment_raw.loc[payment_id]
-        route, direct_debtor_id = resolve_iban(
-            dict(iban_debtor=raw["iban_debtor"], bankroll_code=raw["bankroll_code"]),
-            lookups["debtor_by_iban"],
-            lookups["assignor_by_iban"],
-        )
+        route, direct_debtor_id = resolve_iban(dict(iban_debtor=raw["iban_debtor"]), lookups)
         if direct_debtor_id is not None:
             debtor_id = direct_debtor_id
         else:

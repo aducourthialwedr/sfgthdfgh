@@ -38,7 +38,9 @@ def _imputation_event(payment_id, invoice_id, status, updated_at, residual_amoun
     )
 
 
-def _payment_event_data(payment_id, value_date, amount, iban_debtor, label, bankroll_code="STANDARD"):
+def _payment_event_data(payment_id, value_date, amount, iban_debtor, label):
+    # payment n'a pas de bankroll_code propre (schéma réel) — résolu depuis
+    # le débiteur de la facture candidate, voir _lookups()/debtor_bankroll_code.
     return dict(
         payment_id=payment_id,
         value_date=pd.Timestamp(value_date),
@@ -49,7 +51,6 @@ def _payment_event_data(payment_id, value_date, amount, iban_debtor, label, bank
         label=label,
         channel="SEPA",
         payment_type="VIREMENT",
-        bankroll_code=bankroll_code,
     )
 
 
@@ -81,13 +82,16 @@ def _lookups() -> dict:
     return dict(
         debtor_by_iban={"IBAN_D1": "DBT001"},
         assignor_by_iban={"IBAN_A1": "ASG001"},
+        technical_ibans=frozenset(),
         debtor_name_tokens={"DBT001": ("SARL", "DUPONT")},
+        debtor_bankroll_code={"DBT001": "STANDARD"},
+        name_index={"DUPONT": {"DBT001"}},
     )
 
 
 def _featurize(payment_data, invoice_id, state, as_of):
     invoice = state.get_invoice(invoice_id, as_of=as_of)
-    return featurize(payment_data, invoice, state, as_of, **_lookups())
+    return featurize(payment_data, invoice, state, as_of, _lookups())
 
 
 # --- montant -----------------------------------------------------------------
@@ -192,7 +196,7 @@ def test_is_before_creation() -> None:
         agreement_active_at_creation=True,
     )
     p = _payment_event_data("PMT7", "2024-01-15", 100000, "IBAN_D1", "VIR")
-    f = featurize(p, manual_invoice, state, pd.Timestamp("2024-01-15"), **_lookups())
+    f = featurize(p, manual_invoice, state, pd.Timestamp("2024-01-15"), _lookups())
     assert f["is_before_creation"] is True
 
 
@@ -428,3 +432,11 @@ def test_behavioral_features_reflect_prior_history() -> None:
     assert f["debtor_ref_citation_rate"] == pytest.approx(0.5)  # seule PMTA cite la référence
     assert f["debtor_open_invoice_count"] == 1  # INVB encore ouverte (solde 20000)
     assert f["debtor_open_invoice_amount"] == 20000
+
+
+def test_bankroll_code_resolved_from_invoice_debtor_not_payment(base_state: LedgerState) -> None:
+    # payment n'a pas de bankroll_code propre (schéma réel) : la feature
+    # vient du débiteur de la facture candidate, via lookups["debtor_bankroll_code"].
+    p = _payment_event_data("PMT21", "2024-03-01", 1_000_000, "IBAN_D1", "VIR")
+    f = _featurize(p, "INV001", base_state, pd.Timestamp("2024-03-01"))
+    assert f["bankroll_code"] == "STANDARD"

@@ -64,10 +64,9 @@ def test_journal_covers_all_source_rows(tables: dict[str, pd.DataFrame], journal
         len(tables["invoice"])
         + len(tables["payment"])
         + len(tables["imputation"])
-        + len(tables["debtor"])  # PARTY_OPENED (+ PARTY_CLOSED pour certains)
-        + len(tables["assignor"])
+        + len(tables["debtor"])  # PARTY_OPENED uniquement (pas de closed_at, schéma réel)
+        + len(tables["assignor"])  # PARTY_OPENED (+ PARTY_CLOSED pour certains)
         + len(tables["agreement"])  # AGREEMENT_CREATED (+ DISABLED pour certains)
-        + tables["debtor"]["closed_at"].notna().sum()
         + tables["assignor"]["closed_at"].notna().sum()
         + tables["agreement"]["disabled_at"].notna().sum()
     )
@@ -165,10 +164,12 @@ def test_open_invoices_reflects_closure(tables: dict[str, pd.DataFrame], journal
 def test_party_is_active_before_open_and_after_close(
     tables: dict[str, pd.DataFrame], journal: list
 ) -> None:
-    closed_debtors = tables["debtor"][tables["debtor"]["closed_at"].notna()]
-    if closed_debtors.empty:
-        pytest.skip("aucun débiteur fermé dans cet échantillon")
-    row = closed_debtors.iloc[0]
+    # Seul assignor porte un closed_at (schéma réel) : debtor n'en a pas,
+    # voir test_debtor_never_closes ci-dessous.
+    closed_assignors = tables["assignor"][tables["assignor"]["closed_at"].notna()]
+    if closed_assignors.empty:
+        pytest.skip("aucun cédant fermé dans cet échantillon")
+    row = closed_assignors.iloc[0]
 
     state = LedgerState()
     before_open = row["opened_at"] - pd.Timedelta(days=1)
@@ -181,6 +182,16 @@ def test_party_is_active_before_open_and_after_close(
     state2 = _replay(journal)
     end = journal[-1].timestamp + pd.Timedelta(days=1)
     assert state2.party_is_active(row["party_id"], as_of=end) is False
+
+
+def test_debtor_never_closes(tables: dict[str, pd.DataFrame], journal: list) -> None:
+    """Un débiteur n'a pas de `closed_at` (schéma réel) : une fois ouvert,
+    il reste actif jusqu'à la fin de l'historique connu, sans exception."""
+    assert "closed_at" not in tables["debtor"].columns
+    state = _replay(journal)
+    end = journal[-1].timestamp + pd.Timedelta(days=1)
+    debtor_id = tables["debtor"]["party_id"].iloc[0]
+    assert state.party_is_active(debtor_id, as_of=end) is True
 
 
 def test_behavioral_stats_smoke(tables: dict[str, pd.DataFrame], journal: list) -> None:

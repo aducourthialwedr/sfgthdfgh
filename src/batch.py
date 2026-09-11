@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 from src.blocking import build_static_lookups, generate_candidates, resolve_iban
-from src.decision import SegmentThresholds, classify as decision_classify, top1_with_margin
+from src.decision import SegmentThresholds, top1_with_margin
 from src.events import build_journal
 from src.features import featurize
 from src.model import add_competition_features, calibrated_scores, prepare_features, raw_scores
@@ -70,6 +70,7 @@ def run_backtest(
     lookups = build_static_lookups(tables)
     payment_raw = tables["payment"].set_index("payment_id")
     invoice_agreement = tables["invoice"].set_index("invoice_id")["agreement_id"]
+    invoice_debtor = tables["invoice"].set_index("invoice_id")["debtor_id"]
     agreement_market = tables["agreement"].set_index("agreement_id")["market"]
 
     state = LedgerState()
@@ -103,16 +104,10 @@ def run_backtest(
             for payment_id in pending:
                 payment = payment_raw.loc[payment_id].to_dict()
                 payment["payment_id"] = payment_id
-                candidate_ids = generate_candidates(
-                    payment, state, as_of,
-                    lookups["debtor_by_iban"], lookups["assignor_by_iban"], lookups["debtor_name_tokens"],
-                )
+                candidate_ids = generate_candidates(payment, state, as_of, lookups)
                 for invoice_id in candidate_ids:
                     invoice = state.get_invoice(invoice_id, as_of=as_of)
-                    feats = featurize(
-                        payment, invoice, state, as_of,
-                        lookups["debtor_by_iban"], lookups["assignor_by_iban"], lookups["debtor_name_tokens"],
-                    )
+                    feats = featurize(payment, invoice, state, as_of, lookups)
                     feats["payment_id"] = payment_id
                     feats["invoice_id"] = invoice_id
                     feats["decision_current_amount"] = int(invoice["current_amount"])
@@ -137,8 +132,7 @@ def run_backtest(
                 for payment_id, cands in candidates_by_payment.items():
                     raw = payment_raw.loc[payment_id]
                     route, direct_debtor_id = resolve_iban(
-                        dict(iban_debtor=raw["iban_debtor"], bankroll_code=raw["bankroll_code"]),
-                        lookups["debtor_by_iban"], lookups["assignor_by_iban"],
+                        dict(iban_debtor=raw["iban_debtor"]), lookups,
                     )
                     debtor_id = direct_debtor_id
                     payments_list.append(
@@ -161,7 +155,11 @@ def run_backtest(
                     agreement_id = invoice_agreement.get(primary_invoice)
                     market = agreement_market.get(agreement_id) if agreement_id is not None else None
                     primary_payment_amount = int(payment_raw.loc[proposal.payment_ids[0], "amount"])
-                    bankroll_code = payment_raw.loc[proposal.payment_ids[0], "bankroll_code"]
+                    # bankroll_code n'existe pas sur payment (schéma réel) :
+                    # résolu depuis le débiteur de la facture principale du
+                    # groupe, comme dans features.py.
+                    primary_debtor_id = invoice_debtor.get(primary_invoice)
+                    bankroll_code = lookups["debtor_bankroll_code"].get(primary_debtor_id)
                     seg_row = pd.Series(
                         dict(
                             market=market,

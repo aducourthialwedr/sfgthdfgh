@@ -11,7 +11,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.blocking import (  # noqa: E402
-    TECHNICAL_BANKROLL,
     build_static_lookups,
     generate_candidates,
     resolve_iban,
@@ -21,37 +20,59 @@ from src.generator import GeneratorParams, generate  # noqa: E402
 from src.state import LedgerState  # noqa: E402
 
 
+def _base_lookups(**overrides) -> dict:
+    base = dict(
+        debtor_by_iban={"IBAN_D1": "DBT001"},
+        assignor_by_iban={"IBAN_A1": "ASG001"},
+        technical_ibans=frozenset({"IBAN_TECH1"}),
+    )
+    base.update(overrides)
+    return base
+
+
 # ---------------------------------------------------------------------------
 # resolve_iban (§3.2)
 # ---------------------------------------------------------------------------
 
 
 def test_resolve_iban_debtor_direct() -> None:
-    payment = dict(iban_debtor="IBAN_D1", bankroll_code="STANDARD")
-    route, debtor_id = resolve_iban(payment, {"IBAN_D1": "DBT001"}, {"IBAN_A1": "ASG001"})
+    payment = dict(iban_debtor="IBAN_D1")
+    route, debtor_id = resolve_iban(payment, _base_lookups())
     assert route == "DEBTOR_DIRECT"
     assert debtor_id == "DBT001"
 
 
 def test_resolve_iban_assignor() -> None:
-    payment = dict(iban_debtor="IBAN_A1", bankroll_code="STANDARD")
-    route, debtor_id = resolve_iban(payment, {"IBAN_D1": "DBT001"}, {"IBAN_A1": "ASG001"})
+    payment = dict(iban_debtor="IBAN_A1")
+    route, debtor_id = resolve_iban(payment, _base_lookups())
     assert route == "ASSIGNOR"
     assert debtor_id is None
 
 
+def test_resolve_iban_technical_account_by_iban_membership() -> None:
+    # payment n'a pas de bankroll_code (schéma réel) : le compte technique
+    # se reconnaît par appartenance au référentiel `technical_ibans`, pas
+    # par un champ sur le paiement.
+    payment = dict(iban_debtor="IBAN_TECH1")
+    route, debtor_id = resolve_iban(payment, _base_lookups())
+    assert route == "TECHNICAL_ACCOUNT"
+    assert debtor_id is None
+
+
 def test_resolve_iban_technical_overrides_iban_match() -> None:
-    # bankroll_code arbitre : même si l'IBAN correspond à un débiteur connu,
-    # le bankroll technique route vers TECHNICAL_ACCOUNT.
-    payment = dict(iban_debtor="IBAN_D1", bankroll_code=TECHNICAL_BANKROLL)
-    route, debtor_id = resolve_iban(payment, {"IBAN_D1": "DBT001"}, {})
+    # Un IBAN peut en théorie être répertorié à la fois comme débiteur et
+    # comme compte technique dans des données mal nettoyées : le compte
+    # technique l'emporte (vérifié en premier).
+    payment = dict(iban_debtor="IBAN_D1")
+    lookups = _base_lookups(technical_ibans=frozenset({"IBAN_D1"}))
+    route, debtor_id = resolve_iban(payment, lookups)
     assert route == "TECHNICAL_ACCOUNT"
     assert debtor_id is None
 
 
 def test_resolve_iban_unknown() -> None:
-    payment = dict(iban_debtor="IBAN_X", bankroll_code="STANDARD")
-    route, debtor_id = resolve_iban(payment, {"IBAN_D1": "DBT001"}, {"IBAN_A1": "ASG001"})
+    payment = dict(iban_debtor="IBAN_X")
+    route, debtor_id = resolve_iban(payment, _base_lookups())
     assert route == "UNKNOWN"
     assert debtor_id is None
 
@@ -116,10 +137,14 @@ def hand_built_state() -> LedgerState:
 
 
 def _lookups() -> dict:
+    debtor_name_tokens = {"DBT001": ("SARL", "DUPONT")}
     return dict(
         debtor_by_iban={"IBAN_D1": "DBT001"},
         assignor_by_iban={"IBAN_A1": "ASG001"},
-        debtor_name_tokens={"DBT001": ("SARL", "DUPONT")},
+        technical_ibans=frozenset(),
+        debtor_name_tokens=debtor_name_tokens,
+        debtor_bankroll_code={"DBT001": "STANDARD"},
+        name_index={"DUPONT": {"DBT001"}},
     )
 
 
@@ -131,9 +156,8 @@ def test_k1_finds_debtor_direct_match_in_window(hand_built_state: LedgerState) -
         currency="EUR",
         iban_debtor="IBAN_D1",
         label="VIR SANS REFERENCE",
-        bankroll_code="STANDARD",
     )
-    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2024-03-05"), **_lookups())
+    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2024-03-05"), _lookups())
     assert "INV001" in candidates
 
 
@@ -145,9 +169,8 @@ def test_k1_respects_window(hand_built_state: LedgerState) -> None:
         currency="EUR",
         iban_debtor="IBAN_D1",
         label="VIR SANS REFERENCE",
-        bankroll_code="STANDARD",
     )
-    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2025-06-01"), **_lookups())
+    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2025-06-01"), _lookups())
     assert "INV001" not in candidates
 
 
@@ -159,9 +182,8 @@ def test_k2_finds_reference_match_without_window(hand_built_state: LedgerState) 
         currency="EUR",
         iban_debtor="IBAN_UNKNOWN",
         label="VIR FA24000001",
-        bankroll_code="STANDARD",
     )
-    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2025-12-25"), **_lookups())
+    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2025-12-25"), _lookups())
     assert "INV001" in candidates
 
 
@@ -173,9 +195,8 @@ def test_k3_finds_exact_amount_match(hand_built_state: LedgerState) -> None:
         currency="EUR",
         iban_debtor="IBAN_UNKNOWN",
         label="VIR SANS RIEN",
-        bankroll_code="STANDARD",
     )
-    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2024-03-10"), **_lookups())
+    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2024-03-10"), _lookups())
     assert "INV001" in candidates
 
 
@@ -187,10 +208,42 @@ def test_k4_finds_name_match(hand_built_state: LedgerState) -> None:
         currency="EUR",
         iban_debtor="IBAN_UNKNOWN",
         label="VIREMENT SARL DUPONT",
-        bankroll_code="STANDARD",
     )
-    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2024-03-10"), **_lookups())
+    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2024-03-10"), _lookups())
     assert "INV001" in candidates
+
+
+def test_k4_misses_without_shared_index_token() -> None:
+    # L'index inversé de K4 ne compare qu'aux débiteurs partageant un token
+    # avec le libellé : si "DUPONT" n'est pas indexé, K4 ne le trouve pas
+    # (compromis de rappel assumé pour la scalabilité, voir blocking.py).
+    lookups = _lookups()
+    lookups["name_index"] = {}
+    from src.events import Event
+
+    state = LedgerState()
+    for e in [
+        Event(pd.Timestamp("2024-01-01"), "PARTY_OPENED", (0, ("DBT001",)), dict(party_id="DBT001")),
+        Event(
+            pd.Timestamp("2024-01-01"),
+            "AGREEMENT_CREATED",
+            (1, ("AGR001",)),
+            dict(agreement_id="AGR001", debtor_id="DBT001", client_id="ASG001", market="SERVICES", product="CLASSIQUE", recourse=True),
+        ),
+        Event(
+            pd.Timestamp("2024-02-01"),
+            "INVOICE_CREATED",
+            (2, ("INV001",)),
+            _make_invoice_event("INV001", "DBT001", "AGR001", "FA24000001", "2024-02-01", "2024-03-01", 100000),
+        ),
+    ]:
+        state.apply(e)
+    payment = dict(
+        payment_id="PMT4B", value_date=pd.Timestamp("2024-03-10"), amount=1,
+        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="VIREMENT SARL DUPONT",
+    )
+    candidates = generate_candidates(payment, state, pd.Timestamp("2024-03-10"), lookups)
+    assert "INV001" not in candidates
 
 
 def test_hard_filter_excludes_wrong_currency(hand_built_state: LedgerState) -> None:
@@ -201,9 +254,8 @@ def test_hard_filter_excludes_wrong_currency(hand_built_state: LedgerState) -> N
         currency="USD",
         iban_debtor="IBAN_UNKNOWN",
         label="VIR",
-        bankroll_code="STANDARD",
     )
-    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2024-03-10"), **_lookups())
+    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2024-03-10"), _lookups())
     assert "INV001" not in candidates
 
 
@@ -215,9 +267,8 @@ def test_no_candidates_for_fully_unrelated_payment(hand_built_state: LedgerState
         currency="EUR",
         iban_debtor="IBAN_UNKNOWN",
         label="RIEN A VOIR ICI",
-        bankroll_code="STANDARD",
     )
-    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2024-03-10"), **_lookups())
+    candidates = generate_candidates(payment, hand_built_state, pd.Timestamp("2024-03-10"), _lookups())
     assert candidates == []
 
 
@@ -237,7 +288,7 @@ def test_blocking_recall_at_least_99_percent() -> None:
     for event in journal:
         if event.type == "PAYMENT_RECEIVED":
             payment = event.data
-            candidates = generate_candidates(payment, state, event.timestamp, **lookups)
+            candidates = generate_candidates(payment, state, event.timestamp, lookups)
             candidates_by_payment[payment["payment_id"]] = set(candidates)
         state.apply(event)
 

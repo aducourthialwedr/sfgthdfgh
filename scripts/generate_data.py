@@ -25,6 +25,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out-dir", type=str, default="data")
     p.add_argument("--no-report", action="store_true", help="ne pas afficher le rapport")
+    p.add_argument("--verbose", action="store_true", help="journalise la progression (utile à grande échelle)")
     return p.parse_args()
 
 
@@ -82,7 +83,7 @@ def main() -> None:
         n_months=args.n_months,
         seed=args.seed,
     )
-    tables = generate(params)
+    tables = generate(params, verbose=args.verbose)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

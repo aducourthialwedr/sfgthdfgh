@@ -99,19 +99,13 @@ def test_removing_future_events_does_not_change_features(
     for i, event in enumerate(small_journal):
         if event.type == "PAYMENT_RECEIVED" and 300 < i < len(small_journal) - 300:
             as_of = event.timestamp
-            candidates = generate_candidates(
-                event.data, state, as_of,
-                lookups["debtor_by_iban"], lookups["assignor_by_iban"], lookups["debtor_name_tokens"],
-            )
+            candidates = generate_candidates(event.data, state, as_of, lookups)
             if len(candidates) >= 2:
                 target_index = i
                 target_event = event
                 target_candidates = candidates
                 target_features = [
-                    featurize(
-                        event.data, state.get_invoice(inv_id, as_of=as_of), state, as_of,
-                        lookups["debtor_by_iban"], lookups["assignor_by_iban"], lookups["debtor_name_tokens"],
-                    )
+                    featurize(event.data, state.get_invoice(inv_id, as_of=as_of), state, as_of, lookups)
                     for inv_id in candidates
                 ]
                 break
@@ -129,15 +123,9 @@ def test_removing_future_events_does_not_change_features(
         state2.apply(event)
 
     as_of = target_event.timestamp
-    candidates2 = generate_candidates(
-        target_event.data, state2, as_of,
-        lookups["debtor_by_iban"], lookups["assignor_by_iban"], lookups["debtor_name_tokens"],
-    )
+    candidates2 = generate_candidates(target_event.data, state2, as_of, lookups)
     features2 = [
-        featurize(
-            target_event.data, state2.get_invoice(inv_id, as_of=as_of), state2, as_of,
-            lookups["debtor_by_iban"], lookups["assignor_by_iban"], lookups["debtor_name_tokens"],
-        )
+        featurize(target_event.data, state2.get_invoice(inv_id, as_of=as_of), state2, as_of, lookups)
         for inv_id in candidates2
     ]
 
@@ -188,12 +176,8 @@ def test_amount_features_use_state_not_final_invoice_balance(
         label="TEST",
         channel="SEPA",
         payment_type="VIREMENT",
-        bankroll_code="STANDARD",
     )
     invoice = state.get_invoice(target_invoice_id, as_of=cutoff)
-    feats = featurize(
-        fake_payment, invoice, state, cutoff,
-        lookups["debtor_by_iban"], lookups["assignor_by_iban"], lookups["debtor_name_tokens"],
-    )
+    feats = featurize(fake_payment, invoice, state, cutoff, lookups)
     assert feats["amount_diff_abs"] == 0
     assert feats["amount_exact_match"] is True

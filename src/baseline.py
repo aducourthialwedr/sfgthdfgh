@@ -29,8 +29,7 @@ def baseline_match(
     payment: dict,
     state: LedgerState,
     as_of: pd.Timestamp,
-    debtor_by_iban: dict[str, str],
-    assignor_by_iban: dict[str, str],
+    lookups: dict,
 ) -> Optional[str]:
     """Propose un unique `invoice_id`, ou `None` si aucune règle ne
     s'applique sans ambiguïté.
@@ -63,7 +62,7 @@ def baseline_match(
         if len(pool) == 1:
             return pool[0]["invoice_id"]
 
-    route, debtor_id = resolve_iban(payment, debtor_by_iban, assignor_by_iban)
+    route, debtor_id = resolve_iban(payment, lookups)
     if route == "DEBTOR_DIRECT" and debtor_id is not None:
         matches = [
             inv
@@ -91,13 +90,7 @@ def compute_baseline_predictions(tables: dict[str, pd.DataFrame]) -> dict[str, s
     for event in journal:
         if event.type == "PAYMENT_RECEIVED":
             payment = event.data
-            invoice_id = baseline_match(
-                payment,
-                state,
-                as_of=event.timestamp,
-                debtor_by_iban=lookups["debtor_by_iban"],
-                assignor_by_iban=lookups["assignor_by_iban"],
-            )
+            invoice_id = baseline_match(payment, state, as_of=event.timestamp, lookups=lookups)
             if invoice_id is not None:
                 predictions[payment["payment_id"]] = invoice_id
         state.apply(event)

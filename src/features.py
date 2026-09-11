@@ -136,28 +136,31 @@ def _identity_features(
     invoice: dict,
     state: LedgerState,
     as_of: pd.Timestamp,
-    debtor_by_iban: dict[str, str],
-    assignor_by_iban: dict[str, str],
+    lookups: dict,
 ) -> dict:
-    route, direct_debtor_id = resolve_iban(payment, debtor_by_iban, assignor_by_iban)
+    route, direct_debtor_id = resolve_iban(payment, lookups)
     agreement = state.get_agreement(invoice["agreement_id"], as_of=as_of)
     assignor_id = agreement["client_id"] if agreement is not None else None
 
     same_agreement = False
     if route == "ASSIGNOR":
-        iban_assignor_id = assignor_by_iban.get(payment.get("iban_debtor"))
+        iban_assignor_id = lookups["assignor_by_iban"].get(payment.get("iban_debtor"))
         same_agreement = iban_assignor_id is not None and iban_assignor_id == assignor_id
 
     assignor_active = (
         state.party_is_active(assignor_id, as_of=as_of) if assignor_id is not None else False
     )
 
+    # `payment` n'a pas de bankroll_code propre (schéma réel) : résolu
+    # depuis le débiteur de la facture candidate, comme `market`/`product`.
+    bankroll_code = lookups["debtor_bankroll_code"].get(invoice["debtor_id"])
+
     return dict(
         iban_route=route,
         iban_matches_invoice_debtor=bool(
             route == "DEBTOR_DIRECT" and direct_debtor_id == invoice["debtor_id"]
         ),
-        bankroll_code=payment.get("bankroll_code"),
+        bankroll_code=bankroll_code,
         channel=payment.get("channel"),
         payment_type=payment.get("payment_type"),
         same_agreement=same_agreement,
@@ -197,9 +200,7 @@ def featurize(
     invoice: dict,
     state: LedgerState,
     as_of: pd.Timestamp,
-    debtor_by_iban: dict[str, str],
-    assignor_by_iban: dict[str, str],
-    debtor_name_tokens: dict[str, tuple[str, ...]],
+    lookups: dict,
 ) -> dict:
     """Calcule toutes les features des familles montant, temporel, textuel,
     identité/structure (Phase 4), comportementale et contexte contrat
@@ -208,11 +209,11 @@ def featurize(
     features.update(_amount_features(payment, int(invoice["current_amount"])))
     features.update(_temporal_features(payment, invoice, state, as_of))
     features.update(
-        _textual_features(payment, invoice, debtor_name_tokens.get(invoice["debtor_id"], ()))
+        _textual_features(
+            payment, invoice, lookups["debtor_name_tokens"].get(invoice["debtor_id"], ())
+        )
     )
-    features.update(
-        _identity_features(payment, invoice, state, as_of, debtor_by_iban, assignor_by_iban)
-    )
+    features.update(_identity_features(payment, invoice, state, as_of, lookups))
     features.update(_behavioral_features(invoice, state, as_of))
     features.update(_context_features(invoice, state, as_of))
     return features

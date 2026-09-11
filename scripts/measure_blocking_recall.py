@@ -27,7 +27,7 @@ from src.state import LedgerState  # noqa: E402
 
 
 def load_tables(data_dir: Path) -> dict[str, pd.DataFrame]:
-    names = ["payment", "invoice", "imputation", "assignor", "debtor", "agreement", "ground_truth"]
+    names = ["payment", "invoice", "imputation", "assignor", "debtor", "agreement", "ground_truth", "_technical_ibans"]
     return {name: pd.read_parquet(data_dir / f"{name}.parquet") for name in names}
 
 
@@ -45,14 +45,7 @@ def main() -> None:
     for event in journal:
         if event.type == "PAYMENT_RECEIVED":
             payment = event.data
-            candidates = generate_candidates(
-                payment,
-                state,
-                as_of=event.timestamp,
-                debtor_by_iban=lookups["debtor_by_iban"],
-                assignor_by_iban=lookups["assignor_by_iban"],
-                debtor_name_tokens=lookups["debtor_name_tokens"],
-            )
+            candidates = generate_candidates(payment, state, event.timestamp, lookups)
             candidates_by_payment[payment["payment_id"]] = set(candidates)
             n_payments += 1
         state.apply(event)

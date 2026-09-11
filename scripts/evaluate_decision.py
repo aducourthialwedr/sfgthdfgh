@@ -34,7 +34,7 @@ AMOUNT_TIER_LABELS = ["petit", "moyen", "gros"]
 
 
 def load_tables(data_dir: Path) -> dict[str, pd.DataFrame]:
-    names = ["payment", "invoice", "imputation", "assignor", "debtor", "agreement", "ground_truth"]
+    names = ["payment", "invoice", "imputation", "assignor", "debtor", "agreement", "ground_truth", "_technical_ibans"]
     return {name: pd.read_parquet(data_dir / f"{name}.parquet") for name in names}
 
 

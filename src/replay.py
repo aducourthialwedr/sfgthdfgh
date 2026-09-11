@@ -35,25 +35,10 @@ def build_training_rows(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         if event.type == "PAYMENT_RECEIVED":
             payment = event.data
             as_of = event.timestamp
-            candidate_ids = generate_candidates(
-                payment,
-                state,
-                as_of,
-                lookups["debtor_by_iban"],
-                lookups["assignor_by_iban"],
-                lookups["debtor_name_tokens"],
-            )
+            candidate_ids = generate_candidates(payment, state, as_of, lookups)
             for invoice_id in candidate_ids:
                 invoice = state.get_invoice(invoice_id, as_of=as_of)
-                feats = featurize(
-                    payment,
-                    invoice,
-                    state,
-                    as_of,
-                    lookups["debtor_by_iban"],
-                    lookups["assignor_by_iban"],
-                    lookups["debtor_name_tokens"],
-                )
+                feats = featurize(payment, invoice, state, as_of, lookups)
                 feats["payment_id"] = payment["payment_id"]
                 feats["invoice_id"] = invoice_id
                 feats["t"] = as_of

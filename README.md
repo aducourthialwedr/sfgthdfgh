@@ -17,6 +17,13 @@ Quatre étages (§1 de la spec), dans l'ordre où le paiement les traverse :
 
 Le tout repose sur un principe unique : **le rapprochement est un problème événementiel**. `src/events.py` dérive un journal ordonné des six tables sources, et `src/state.py` (`LedgerState`) reconstruit l'état du grand livre à un instant `t` donné, en n'utilisant jamais d'information postérieure à `t`. Toute feature, tout candidat, passe par cette interface — c'est la garantie mécanique d'absence de fuite (§8.2 de la spec).
 
+### Écarts connus avec le schéma réel
+
+Le générateur synthétique (`src/generator.py`) s'écarte du schéma §2 de la spec sur deux points, alignés sur le schéma réel observé :
+
+- **`debtor` n'a pas de `closed_at`** (seul `opened_at` existe) — un débiteur, une fois ouvert, ne se ferme jamais. Seul `assignor` porte les deux dates.
+- **`payment` n'a pas de `bankroll_code`** — résolu par jointure sur le débiteur de la facture candidate (`lookups["debtor_bankroll_code"]`, voir `src/blocking.py::build_static_lookups`). Le routage IBAN vers un compte technique/de liaison (`TECHNICAL_ACCOUNT`) ne dépend donc plus d'un champ sur le paiement mais de l'appartenance de son IBAN à un petit référentiel `_technical_ibans.parquet` (généré par `generator.py`, config figée côté factor dans la réalité).
+
 ## Structure du projet
 
 ```
@@ -89,17 +96,28 @@ Script bonus, indépendant du reste : `python scripts/replay_demo.py` rejoue le 
 python -m pytest tests/ -q
 ```
 
-~130 tests, tous doivent passer avant de considérer un changement terminé. Ils tournent sur des jeux de données **générés à la volée** (petits volumes, seeds fixes) — aucun test ne dépend du contenu de `data/`.
+~133 tests, tous doivent passer avant de considérer un changement terminé. Ils tournent sur des jeux de données **générés à la volée** (petits volumes, seeds fixes) — aucun test ne dépend du contenu de `data/`.
 
 ### Régénérer après une modification
 
 Si vous touchez à `generator.py` → tout le reste doit être régénéré dans l'ordre (étapes 1 à 8 ci-dessus). Si vous touchez seulement à `features.py`, `model.py`, `subsets.py` ou `decision.py` → repartez de l'étape 4 (le dataset de features doit être reconstruit) ou de l'étape 5 si seul le modèle change.
 
+## Performance à grande échelle
+
+Testé et validé jusqu'à 200 000 débiteurs / ~31 700 paiements en local (au-delà, la génération synthétique elle-même — pas le pipeline — devient le facteur limitant). Le point sensible était l'étage A : comparer chaque paiement à *tous* les débiteurs (clé K4, similarité de nom) est O(n_paiements × n_débiteurs) — infaisable au-delà de quelques dizaines de milliers de débiteurs (des jours de calcul à partir du million). `src/blocking.py::build_static_lookups` construit à la place un **index inversé** par token de nom, avec un **élagage dynamique des tokens trop fréquents** (`_NAME_INDEX_MIN_BUCKET` / `_NAME_INDEX_MAX_BUCKET_FRACTION`) — une liste de stopwords figée ne suffit pas, un mot de secteur ("INDUSTRIE", "SERVICES"...) peut être partagé par une grosse fraction des débiteurs réels sans qu'on puisse l'anticiper. Résultat mesuré (`blocking + featurisation`, `build_training_rows`) : temps par paiement quasiment stable entre 200 et 200 000 débiteurs (~1 à 4,5 ms/paiement) — extrapolé à 500 000 paiements, de l'ordre de 30 à 40 minutes, contre plusieurs centaines de jours avant correctif.
+
+Si une nouvelle lenteur apparaît à l'échelle réelle (2M débiteurs, 500K paiements, ~8M événements) :
+1. Vérifiez d'abord que ce n'est pas à nouveau une clé de blocking non indexée (K1/K2/K3 utilisent déjà les index de `LedgerState`, K4 l'index inversé ci-dessus — toute nouvelle clé doit suivre le même principe, jamais une boucle sur l'ensemble des débiteurs/factures).
+2. `LedgerState` (`state.py`) reste la partie la plus sensible : `dataclasses.asdict()` est appelé à chaque lecture de facture (`get_invoice`/`open_invoices`), ce n'est pas encore optimisé pour un très gros volume — un remplacement par une construction de dict manuelle serait le prochain gain le plus probable si le profilage le confirme.
+3. `features.py::featurize` reste une fonction par paire (candidat), appelée en boucle Python dans `replay.py`/`batch.py` — vectoriser la featurisation (pandas/numpy sur tout le lot d'un paiement, `rapidfuzz.process.cdist` pour la similarité de nom en lot) est le levier suivant si le volume de candidats par paiement grossit fortement.
+
 ## Comment modifier le projet
 
 ### Ajouter ou changer une feature (§5.3)
 
-Toutes les features vivent dans `src/features.py`, regroupées par famille (`_amount_features`, `_temporal_features`, `_textual_features`, `_identity_features`, `_behavioral_features`, `_context_features`). Pour en ajouter une :
+Toutes les features vivent dans `src/features.py`, regroupées par famille (`_amount_features`, `_temporal_features`, `_textual_features`, `_identity_features`, `_behavioral_features`, `_context_features`). `featurize()`, `generate_candidates()`, `resolve_iban()` et `baseline_match()` prennent tous un unique paramètre `lookups: dict` (produit par `blocking.build_static_lookups`) plutôt que des arguments individuels — si une feature a besoin d'un nouveau référentiel statique (IBAN, table de correspondance...), ajoutez-le comme clé de ce dict plutôt que de faire grossir les signatures.
+
+Pour ajouter une feature :
 
 1. Écrivez-la dans la fonction de famille appropriée (ou créez-en une nouvelle).
 2. Si elle dépend du temps ou de l'historique, elle **doit** passer par une méthode de `LedgerState` avec un `as_of` explicite — jamais lire `tables['invoice']`/`tables['imputation']` directement dans `features.py`. C'est la règle non négociable du projet (voir `tests/test_replay.py::test_removing_future_events_does_not_change_features` et `test_amount_features_use_state_not_final_invoice_balance` pour le genre de test qui doit continuer à passer).

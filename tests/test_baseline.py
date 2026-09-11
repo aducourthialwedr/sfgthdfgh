@@ -64,15 +64,19 @@ def two_invoice_state() -> LedgerState:
 
 
 def _lookups(debtor_iban: str = "IBAN_D1") -> dict:
-    return dict(debtor_by_iban={debtor_iban: "DBT001"}, assignor_by_iban={"IBAN_A1": "ASG001"})
+    return dict(
+        debtor_by_iban={debtor_iban: "DBT001"},
+        assignor_by_iban={"IBAN_A1": "ASG001"},
+        technical_ibans=frozenset(),
+    )
 
 
 def test_rule_a_matches_exact_reference(two_invoice_state: LedgerState) -> None:
     payment = dict(
         payment_id="PMT1", value_date=pd.Timestamp("2024-03-02"), amount=999,
-        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="VIR FA24000001", bankroll_code="STANDARD",
+        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="VIR FA24000001",
     )
-    result = baseline_match(payment, two_invoice_state, pd.Timestamp("2024-03-02"), **_lookups())
+    result = baseline_match(payment, two_invoice_state, pd.Timestamp("2024-03-02"), _lookups())
     assert result == "INV001"
 
 
@@ -110,9 +114,9 @@ def ambiguous_reference_state() -> LedgerState:
 def test_rule_a_strong_match_wins_despite_shared_weak_variant(ambiguous_reference_state: LedgerState) -> None:
     payment = dict(
         payment_id="PMT2", value_date=pd.Timestamp("2024-03-02"), amount=999,
-        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="VIR FA0012345", bankroll_code="STANDARD",
+        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="VIR FA0012345",
     )
-    result = baseline_match(payment, ambiguous_reference_state, pd.Timestamp("2024-03-02"), **_lookups())
+    result = baseline_match(payment, ambiguous_reference_state, pd.Timestamp("2024-03-02"), _lookups())
     assert result == "INV001"
 
 
@@ -121,27 +125,27 @@ def test_rule_a_abstains_on_ambiguous_weak_reference(ambiguous_reference_state: 
     # sans préfixe distinctif : aucune ne l'emporte, la baseline s'abstient.
     payment = dict(
         payment_id="PMT2b", value_date=pd.Timestamp("2024-03-02"), amount=999,
-        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="VIR 12345", bankroll_code="STANDARD",
+        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="VIR 12345",
     )
-    result = baseline_match(payment, ambiguous_reference_state, pd.Timestamp("2024-03-02"), **_lookups())
+    result = baseline_match(payment, ambiguous_reference_state, pd.Timestamp("2024-03-02"), _lookups())
     assert result is None
 
 
 def test_rule_b_matches_exact_amount_on_identified_debtor(two_invoice_state: LedgerState) -> None:
     payment = dict(
         payment_id="PMT3", value_date=pd.Timestamp("2024-03-02"), amount=250000,
-        currency="EUR", iban_debtor="IBAN_D1", label="VIR SANS REFERENCE", bankroll_code="STANDARD",
+        currency="EUR", iban_debtor="IBAN_D1", label="VIR SANS REFERENCE",
     )
-    result = baseline_match(payment, two_invoice_state, pd.Timestamp("2024-03-02"), **_lookups())
+    result = baseline_match(payment, two_invoice_state, pd.Timestamp("2024-03-02"), _lookups())
     assert result == "INV002"
 
 
 def test_rule_b_abstains_without_debtor_identification(two_invoice_state: LedgerState) -> None:
     payment = dict(
         payment_id="PMT4", value_date=pd.Timestamp("2024-03-02"), amount=250000,
-        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="VIR SANS REFERENCE", bankroll_code="STANDARD",
+        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="VIR SANS REFERENCE",
     )
-    result = baseline_match(payment, two_invoice_state, pd.Timestamp("2024-03-02"), **_lookups())
+    result = baseline_match(payment, two_invoice_state, pd.Timestamp("2024-03-02"), _lookups())
     assert result is None
 
 
@@ -150,18 +154,18 @@ def test_rule_a_takes_priority_over_rule_b(two_invoice_state: LedgerState) -> No
     # exactement à INV002 (250000) : la règle A doit l'emporter.
     payment = dict(
         payment_id="PMT5", value_date=pd.Timestamp("2024-03-02"), amount=250000,
-        currency="EUR", iban_debtor="IBAN_D1", label="VIR FA24000001", bankroll_code="STANDARD",
+        currency="EUR", iban_debtor="IBAN_D1", label="VIR FA24000001",
     )
-    result = baseline_match(payment, two_invoice_state, pd.Timestamp("2024-03-02"), **_lookups())
+    result = baseline_match(payment, two_invoice_state, pd.Timestamp("2024-03-02"), _lookups())
     assert result == "INV001"
 
 
 def test_no_match_when_nothing_applies(two_invoice_state: LedgerState) -> None:
     payment = dict(
         payment_id="PMT6", value_date=pd.Timestamp("2024-03-02"), amount=42,
-        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="RIEN DU TOUT", bankroll_code="STANDARD",
+        currency="EUR", iban_debtor="IBAN_UNKNOWN", label="RIEN DU TOUT",
     )
-    result = baseline_match(payment, two_invoice_state, pd.Timestamp("2024-03-02"), **_lookups())
+    result = baseline_match(payment, two_invoice_state, pd.Timestamp("2024-03-02"), _lookups())
     assert result is None
 
 
@@ -185,13 +189,7 @@ def test_baseline_precision_is_high_and_coverage_is_reasonable() -> None:
     for event in journal:
         if event.type == "PAYMENT_RECEIVED":
             payment = event.data
-            inv_id = baseline_match(
-                payment,
-                state,
-                as_of=event.timestamp,
-                debtor_by_iban=lookups["debtor_by_iban"],
-                assignor_by_iban=lookups["assignor_by_iban"],
-            )
+            inv_id = baseline_match(payment, state, as_of=event.timestamp, lookups=lookups)
             if inv_id is not None:
                 predictions[payment["payment_id"]] = inv_id
         state.apply(event)

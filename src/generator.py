@@ -12,10 +12,18 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import time
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+
+def _log(msg: str) -> None:
+    """Progression optionnelle (`verbose=True`) — silencieux par défaut,
+    utilisé par les tests et le pipeline normal sans polluer leur sortie."""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
 
 # --------------------------------------------------------------------------
 # Enums (choix arbitraires du générateur, non imposés par la spec)
@@ -24,7 +32,6 @@ import pandas as pd
 CHANNELS = ["SEPA", "SWIFT", "CHEQUE", "LCR"]
 PAYMENT_TYPES = ["VIREMENT", "PRELEVEMENT", "REMISE_CHEQUE", "LCR"]
 BANKROLL_CODES = ["STANDARD", "CONFIDENTIEL", "SOUS_PARTICIPATION"]
-TECHNICAL_BANKROLL = "TECHNIQUE"
 MARKETS = ["BTP", "INDUSTRIE", "SERVICES", "COMMERCE"]
 _MARKET_PROBS = [0.25, 0.30, 0.30, 0.15]  # doit rester aligné avec _gen_parties
 PRODUCTS = ["CLASSIQUE", "INVERSE", "CONFIDENTIEL"]
@@ -60,11 +67,47 @@ DEFAULT_CASE_WEIGHTS: dict[str, float] = {
     "no_invoice": 0.01,
 }
 
+# Pondération alternative approchant le ratio factures/paiements observé en
+# production (~1.7M factures / 500k paiements ≈ 3,4:1) — bien plus de
+# regroupement 1↔n que le mix par défaut. Utilisée pour les benchmarks de
+# performance à volume réel, pas pour l'entraînement (qui n'a pas besoin de
+# coller à ce ratio précis).
+HIGH_GROUPING_CASE_WEIGHTS: dict[str, float] = {
+    "1-1_clean": 0.08,
+    "1-1_noisy": 0.04,
+    "1-n": 0.72,
+    "n-1": 0.08,
+    "n-n": 0.04,
+    "discount": 0.02,
+    "bank_fee": 0.01,
+    "retention_btp": 0.005,
+    "no_invoice": 0.005,
+}
+
 _SURNAMES = [
     "MARTIN", "BERNARD", "DUBOIS", "THOMAS", "ROBERT", "PETIT", "DURAND", "LEROY",
     "MOREAU", "SIMON", "LAURENT", "LEFEBVRE", "MICHEL", "GARCIA", "DAVID", "BERTRAND",
     "ROUX", "VINCENT", "FONTAINE", "CHEVALIER", "GAUTHIER", "MASSON", "DUPONT",
     "LAMBERT", "BONNET", "FRANCOIS", "MARTINEZ", "LEGRAND", "GARNIER", "FAURE",
+    "ANDRE", "MERCIER", "BLANC", "GUERIN", "BOYER", "CLEMENT", "MEYER", "GAUTIER",
+    "GIRARD", "ROBIN", "MOLINA", "MULLER", "LEROUX", "COLIN", "NOEL", "PERRIN",
+    "MOREL", "RENARD", "GIRAUD", "BOURGEOIS", "DENIS", "DUMONT", "MARCHAND",
+    "DUFOUR", "DUMAS", "MARIE", "BRUN", "PICARD", "MEUNIER", "SCHMITT", "ROY",
+    "JOLY", "CARON", "GAILLARD", "ROUSSEAU", "OLIVIER", "PIERRE", "BOULANGER",
+    "LOUIS", "LEBRUN", "ARNAUD", "GUILLOT", "GUILLAUME", "CHARLES", "HUBERT",
+    "ROLLAND", "JEAN", "MASSE", "BOUCHER", "PAUL", "HUET", "LUCAS", "FERNANDEZ",
+    "RENAUD", "ADAM", "PONS", "PERRET", "MOULIN", "FISCHER", "PASQUIER", "GUYOT",
+    "BENOIT", "VIDAL", "PICOT", "COLAS", "VASSEUR", "REY", "DELAUNAY", "BRIAND",
+    "BOUVIER", "LEMAIRE", "LEMOINE", "COUSIN", "LACROIX", "MAILLARD", "TESSIER",
+    "GERARD", "SEGUIN", "LEGER", "COLLET", "LOPEZ", "HENRY", "RIVIERE", "PELLETIER",
+    "COUTURIER", "CORDIER", "MALLET", "VILLA", "BARBIER", "SANCHEZ", "AUBRY",
+    "AUBERT", "REYNAUD", "HERVE", "SALMON", "PRUDHOMME", "FOURNIER", "CHARPENTIER",
+    "GAY", "MICHAUD", "VERNET", "BAILLY", "LEFORT", "BAILLEUL", "PAGE", "JULIEN",
+    "GIROUX", "SIMONET", "DAGUENET", "PELTIER", "TISSOT", "PERNOT", "MARCHAL",
+    "GENTIL", "VALLET", "COQUET", "SALLE", "BODIN", "BRETON", "CAILLE",
+    "CHAUVIN", "COUSTEAU", "DEVAUX", "ETIENNE", "FABRE", "GALLET", "HAMON",
+    "ISAMBERT", "JANIN", "KELLER", "LACOMBE", "MAGNIN", "NAVARRE", "ORY", "OZENNE",
+    "QUENTIN", "RAMBAUD", "SAUVAGE", "TARDIF", "URVOY", "VALOIS", "WEBER", "PAULIN",
 ]
 _LEGAL_FORMS = ["SARL", "SAS", "SA", "EURL", "SNC", "SASU"]
 _SECTOR_WORDS = {
@@ -218,36 +261,47 @@ def build_label(
 
 
 def _gen_parties(
-    rng: np.random.Generator, n: int, prefix: str, params: GeneratorParams, is_debtor: bool
+    rng: np.random.Generator,
+    n: int,
+    prefix: str,
+    params: GeneratorParams,
+    is_debtor: bool,
+    verbose: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Génère `debtor` ou `assignor`. Schéma réel observé : `debtor` n'a pas
+    de `closed_at` (un débiteur n'est jamais formellement fermé) ; seul
+    `assignor` en porte un. `opened_at` existe pour les deux."""
     rows = []
     profiles = []
     bankroll = rng.choice(BANKROLL_CODES, size=n, p=[0.7, 0.2, 0.1])
     dominant_market = rng.choice(MARKETS, size=n, p=_MARKET_PROBS)
     payer_type = rng.choice(PAYER_TYPES, size=n, p=[0.5, 0.25, 0.25])
     ref_citation_rate = rng.beta(2, 2, size=n)
+    log_every = max(1, n // 20)
     for i in range(n):
+        if verbose and i > 0 and i % log_every == 0:
+            _log(f"  {prefix} : {i:,}/{n:,}")
         party_id = f"{prefix}{i + 1:05d}"
         market = dominant_market[i]
         name = _fake_company_name(rng, market=market if is_debtor else None)
         iban = _fake_iban(rng)
         opened_at = params.start_date - dt.timedelta(days=int(rng.integers(30, 1000)))
-        closed_at = pd.NaT
-        if rng.random() < 0.05:
-            span = (params.end_date - params.start_date).days
-            closed_at = pd.Timestamp(params.start_date) + pd.Timedelta(
-                days=int(rng.integers(60, max(61, span)))
-            )
-        rows.append(
-            dict(
-                party_id=party_id,
-                bankroll_code=bankroll[i],
-                iban=iban,
-                name=name,
-                opened_at=pd.Timestamp(opened_at),
-                closed_at=closed_at,
-            )
+        row = dict(
+            party_id=party_id,
+            bankroll_code=bankroll[i],
+            iban=iban,
+            name=name,
+            opened_at=pd.Timestamp(opened_at),
         )
+        if not is_debtor:
+            closed_at = pd.NaT
+            if rng.random() < 0.05:
+                span = (params.end_date - params.start_date).days
+                closed_at = pd.Timestamp(params.start_date) + pd.Timedelta(
+                    days=int(rng.integers(60, max(61, span)))
+                )
+            row["closed_at"] = closed_at
+        rows.append(row)
         if is_debtor:
             profiles.append(
                 dict(
@@ -268,16 +322,25 @@ def _gen_agreements(
     debtor_profiles: pd.DataFrame,
     assignors: pd.DataFrame,
     params: GeneratorParams,
+    verbose: bool = False,
 ) -> pd.DataFrame:
     rows = []
     agr_seq = 0
-    profile_by_debtor = debtor_profiles.set_index("party_id")
-    for _, debtor in debtors.iterrows():
-        market = profile_by_debtor.loc[debtor["party_id"], "dominant_market"]
+    # dict Python plutôt que Series.loc/iterrows (~10-100x plus rapide à
+    # grande échelle : chaque .loc[]/iterrows() a un coût pandas fixe par
+    # appel, dominant sur plusieurs millions d'itérations).
+    market_by_debtor = dict(zip(debtor_profiles["party_id"], debtor_profiles["dominant_market"]))
+    assignor_ids = assignors["party_id"].to_numpy()
+    debtor_ids = debtors["party_id"].to_numpy()
+    n_debtors = len(debtor_ids)
+    log_every = max(1, n_debtors // 20)
+
+    for i, debtor_id in enumerate(debtor_ids):
+        if verbose and i > 0 and i % log_every == 0:
+            _log(f"  agreements : {i:,}/{n_debtors:,} débiteurs traités ({len(rows):,} agreements)")
+        market = market_by_debtor[debtor_id]
         n_agreements = int(rng.integers(1, 4))
-        chosen_assignors = rng.choice(
-            assignors["party_id"].to_numpy(), size=n_agreements, replace=False
-        )
+        chosen_assignors = rng.choice(assignor_ids, size=n_agreements, replace=False)
         for j, assignor_id in enumerate(chosen_assignors):
             agr_seq += 1
             agreement_id = f"AGR{agr_seq:06d}"
@@ -293,7 +356,7 @@ def _gen_agreements(
             rows.append(
                 dict(
                     agreement_id=agreement_id,
-                    debtor_id=debtor["party_id"],
+                    debtor_id=debtor_id,
                     client_id=assignor_id,
                     contract_number=f"CTR{agr_seq:06d}",
                     created_at=pd.Timestamp(created_at),
@@ -316,40 +379,43 @@ def _gen_invoices_base(
     debtors: pd.DataFrame,
     agreements: pd.DataFrame,
     params: GeneratorParams,
+    verbose: bool = False,
 ) -> pd.DataFrame:
     rows = []
-    agreements_by_debtor: dict[str, pd.DataFrame] = {
-        d: g for d, g in agreements.groupby("debtor_id")
+    # Listes de dicts Python plutôt que DataFrame filtré + .sample() par
+    # facture : `.sample(random_state=...)` recrée un objet RandomState à
+    # chaque appel (coût pandas connu, dominant sur des millions d'appels),
+    # et le filtrage booléen a lui aussi un coût pandas fixe par appel.
+    agreements_by_debtor: dict[str, list[dict]] = {
+        d: g.to_dict("records") for d, g in agreements.groupby("debtor_id")
     }
     debtor_ids = debtors["party_id"].to_numpy()
-    debtor_closed = debtors.set_index("party_id")["closed_at"]
     span_days = (params.end_date - params.start_date).days
+    log_every = max(1, params.n_invoices // 20)
 
     seq = 0
-    for _ in range(params.n_invoices):
+    for idx in range(params.n_invoices):
+        if verbose and idx > 0 and idx % log_every == 0:
+            _log(f"  factures : {idx:,}/{params.n_invoices:,}")
         debtor_id = rng.choice(debtor_ids)
-        closed_at = debtor_closed.loc[debtor_id]
-        max_day = span_days
-        if pd.notna(closed_at):
-            closed_offset = (closed_at.date() - params.start_date).days
-            max_day = min(max_day, max(1, closed_offset))
-        creation_offset = int(rng.integers(0, max(1, max_day)))
+        # Un débiteur n'a pas de date de fermeture (schéma réel) : seule la
+        # fenêtre globale de génération borne la date de création.
+        creation_offset = int(rng.integers(0, max(1, span_days)))
         creation_date = params.start_date + dt.timedelta(days=creation_offset)
 
         candidate_agreements = agreements_by_debtor.get(debtor_id)
-        if candidate_agreements is None:
+        if not candidate_agreements:
             continue
         creation_ts = pd.Timestamp(creation_date)
-        active = candidate_agreements[
-            (candidate_agreements["created_at"] <= creation_ts)
-            & (
-                candidate_agreements["disabled_at"].isna()
-                | (candidate_agreements["disabled_at"] > creation_ts)
-            )
+        active = [
+            a
+            for a in candidate_agreements
+            if a["created_at"] <= creation_ts
+            and (pd.isna(a["disabled_at"]) or a["disabled_at"] > creation_ts)
         ]
-        if active.empty:
+        if not active:
             continue
-        agreement = active.sample(n=1, random_state=int(rng.integers(0, 2**31 - 1))).iloc[0]
+        agreement = active[int(rng.integers(0, len(active)))]
 
         seq += 1
         invoice_id = f"INV{seq:06d}"
@@ -445,15 +511,18 @@ def _sample_delay_days(rng: np.random.Generator, payer_type: str, market: str) -
 
 
 def _pick_iban_route(
-    rng: np.random.Generator, debtor_iban: str, assignor_iban: str
-) -> tuple[str, str]:
-    """Retourne (iban_debtor_du_paiement, bankroll_code_du_paiement)."""
+    rng: np.random.Generator, debtor_iban: str, assignor_iban: str, technical_ibans: list[str]
+) -> str:
+    """Retourne l'IBAN émetteur du paiement. `payment` n'a pas de
+    `bankroll_code` propre (schéma réel) : le compte technique se
+    reconnaît par appartenance à un pool d'IBAN techniques connus, pas par
+    un champ dédié — voir `blocking.resolve_iban`."""
     r = rng.random()
     if r < 0.85:
-        return debtor_iban, None  # DEBTOR_DIRECT
+        return debtor_iban  # DEBTOR_DIRECT
     if r < 0.93:
-        return assignor_iban, None  # ASSIGNOR
-    return _fake_iban(rng), TECHNICAL_BANKROLL  # TECHNICAL_ACCOUNT
+        return assignor_iban  # ASSIGNOR
+    return str(rng.choice(technical_ibans))  # TECHNICAL_ACCOUNT
 
 
 @dataclasses.dataclass
@@ -476,8 +545,8 @@ def _materialize_plan(
     debtor_row: pd.Series,
     debtor_profile: pd.Series,
     assignor_iban: str,
-    assignor_bankroll: str,
     collector_ibans: list[str],
+    technical_ibans: list[str],
     counters: _Counters,
 ) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
     """Construit (payment_rows, imputation_rows, ground_truth_rows, invoice_final_rows)."""
@@ -505,8 +574,7 @@ def _materialize_plan(
         return ts
 
     def make_payment(value_date: dt.date, amount: int, ref_for_label: str, noisy: bool) -> dict:
-        iban_debtor, forced_bankroll = _pick_iban_route(rng, debtor_row["iban"], assignor_iban)
-        bankroll_code = forced_bankroll or debtor_row["bankroll_code"]
+        iban_debtor = _pick_iban_route(rng, debtor_row["iban"], assignor_iban, technical_ibans)
         include_ref = cites_ref and not noisy
         if noisy:
             noise_level = str(rng.choice(["high", "empty", "numeric_only"], p=[0.5, 0.3, 0.2]))
@@ -523,7 +591,6 @@ def _materialize_plan(
             label=label,
             channel=str(rng.choice(CHANNELS, p=[0.6, 0.1, 0.2, 0.1])),
             payment_type=str(rng.choice(PAYMENT_TYPES, p=[0.7, 0.1, 0.15, 0.05])),
-            bankroll_code=bankroll_code,
         )
 
     if case_type in ("1-1_clean", "1-1_noisy", "discount", "bank_fee", "retention_btp"):
@@ -715,18 +782,23 @@ def _gen_orphan_payments(
     debtors: pd.DataFrame,
     assignors: pd.DataFrame,
     collector_ibans: list[str],
+    technical_ibans: list[str],
     params: GeneratorParams,
     counters: _Counters,
 ) -> list[dict]:
     rows = []
     span = (params.end_date - params.start_date).days
+    debtor_records = debtors[["iban", "name"]].to_dict("records")
+    assignor_ibans = assignors["iban"].to_numpy()
     for _ in range(n):
-        debtor = debtors.sample(n=1, random_state=int(rng.integers(0, 2**31 - 1))).iloc[0]
+        debtor = debtor_records[int(rng.integers(0, len(debtor_records)))]
         value_date = params.start_date + dt.timedelta(days=int(rng.integers(0, span)))
         amount_eur = float(np.clip(rng.lognormal(mean=7.5, sigma=0.8), 20, 20_000))
         amount = int(round(amount_eur * 100))
         fake_ref = f"FA{value_date:%y}{int(rng.integers(0, 999999)):06d}"
-        iban_debtor, forced_bankroll = _pick_iban_route(rng, debtor["iban"], str(rng.choice(assignors["iban"])))
+        iban_debtor = _pick_iban_route(
+            rng, debtor["iban"], str(rng.choice(assignor_ibans)), technical_ibans
+        )
         label = build_label(
             rng, fake_ref, debtor["name"], include_ref=rng.random() < 0.3, noise_level="high"
         )
@@ -741,7 +813,6 @@ def _gen_orphan_payments(
                 label=label,
                 channel=str(rng.choice(CHANNELS)),
                 payment_type=str(rng.choice(PAYMENT_TYPES)),
-                bankroll_code=forced_bankroll or debtor["bankroll_code"],
             )
         )
     return rows
@@ -752,26 +823,44 @@ def _gen_orphan_payments(
 # --------------------------------------------------------------------------
 
 
-def generate(params: GeneratorParams) -> dict[str, pd.DataFrame]:
+def generate(params: GeneratorParams, verbose: bool = False) -> dict[str, pd.DataFrame]:
     """Génère les six tables + `ground_truth` (+ `_debtor_profile` de debug).
+
+    `verbose=True` journalise la progression (utile à grande échelle) —
+    silencieux par défaut pour ne pas polluer les tests ni les usages
+    normaux du pipeline.
 
     Retourne un dict de DataFrames prêtes à écrire en Parquet.
     """
     rng = np.random.default_rng(params.seed)
 
-    assignors, _ = _gen_parties(rng, params.n_assignors, "ASG", params, is_debtor=False)
-    debtors, debtor_profiles = _gen_parties(rng, params.n_debtors, "DBT", params, is_debtor=True)
-    agreements = _gen_agreements(rng, debtors, debtor_profiles, assignors, params)
-    invoices_base = _gen_invoices_base(rng, debtors, agreements, params)
+    if verbose:
+        _log(f"Génération des cédants ({params.n_assignors:,})...")
+    assignors, _ = _gen_parties(rng, params.n_assignors, "ASG", params, is_debtor=False, verbose=verbose)
+    if verbose:
+        _log(f"Génération des débiteurs ({params.n_debtors:,})...")
+    debtors, debtor_profiles = _gen_parties(rng, params.n_debtors, "DBT", params, is_debtor=True, verbose=verbose)
+    if verbose:
+        _log("Génération des agreements...")
+    agreements = _gen_agreements(rng, debtors, debtor_profiles, assignors, params, verbose=verbose)
+    if verbose:
+        _log(f"Génération des factures ({params.n_invoices:,})...")
+    invoices_base = _gen_invoices_base(rng, debtors, agreements, params, verbose=verbose)
 
+    if verbose:
+        _log("Construction des plans de règlement...")
     plans = _build_settlement_plans(rng, invoices_base, params.case_weights)
 
-    debtors_idx = debtors.set_index("party_id")
-    profiles_idx = debtor_profiles.set_index("party_id")
-    assignors_idx = assignors.set_index("party_id")
-    agreements_idx = agreements.set_index("agreement_id")
+    # dict Python plutôt que DataFrame.loc[] par plan (~des centaines de
+    # milliers à plusieurs millions d'appels selon l'échelle) : chaque
+    # .loc[] a un coût pandas fixe, dominant à cette fréquence.
+    debtors_by_id = debtors.set_index("party_id").to_dict("index")
+    profiles_by_id = debtor_profiles.set_index("party_id").to_dict("index")
+    assignors_by_id = assignors.set_index("party_id").to_dict("index")
+    assignor_id_by_agreement = dict(zip(agreements["agreement_id"], agreements["client_id"]))
 
     collector_ibans = [_fake_iban(rng) for _ in range(5)]
+    technical_ibans = [_fake_iban(rng) for _ in range(5)]
     counters = _Counters()
 
     all_payments: list[dict] = []
@@ -779,12 +868,18 @@ def generate(params: GeneratorParams) -> dict[str, pd.DataFrame]:
     all_gts: list[dict] = []
     final_amounts: dict[str, int] = {}
 
-    for plan in plans:
-        debtor_row = debtors_idx.loc[plan["debtor_id"]]
-        debtor_profile = profiles_idx.loc[plan["debtor_id"]]
+    n_plans = len(plans)
+    log_every = max(1, n_plans // 20)
+    if verbose:
+        _log(f"Matérialisation de {n_plans:,} plans de règlement...")
+    for i, plan in enumerate(plans):
+        if verbose and i > 0 and i % log_every == 0:
+            _log(f"  plans : {i:,}/{n_plans:,} ({len(all_payments):,} paiements générés)")
+        debtor_row = debtors_by_id[plan["debtor_id"]]
+        debtor_profile = profiles_by_id[plan["debtor_id"]]
         agreement_id = plan["invoices"][0]["agreement_id"]
-        assignor_id = agreements_idx.loc[agreement_id, "client_id"]
-        assignor_row = assignors_idx.loc[assignor_id]
+        assignor_id = assignor_id_by_agreement[agreement_id]
+        assignor_row = assignors_by_id[assignor_id]
 
         payments, imputations, gts, finals = _materialize_plan(
             rng,
@@ -792,8 +887,8 @@ def generate(params: GeneratorParams) -> dict[str, pd.DataFrame]:
             debtor_row,
             debtor_profile,
             assignor_row["iban"],
-            assignor_row["bankroll_code"],
             collector_ibans,
+            technical_ibans,
             counters,
         )
         all_payments.extend(payments)
@@ -805,7 +900,7 @@ def generate(params: GeneratorParams) -> dict[str, pd.DataFrame]:
     n_orphans = max(1, int(len(invoices_base) * params.case_weights.get("no_invoice", 0.01)))
     all_payments.extend(
         _gen_orphan_payments(
-            rng, n_orphans, debtors, assignors, collector_ibans, params, counters
+            rng, n_orphans, debtors, assignors, collector_ibans, technical_ibans, params, counters
         )
     )
 
@@ -836,4 +931,9 @@ def generate(params: GeneratorParams) -> dict[str, pd.DataFrame]:
         "agreement": agreements.reset_index(drop=True),
         "ground_truth": ground_truth_df.reset_index(drop=True),
         "_debtor_profile": debtor_profiles.reset_index(drop=True),
+        # `payment` n'a pas de bankroll_code (schéma réel) : le compte
+        # technique/de liaison se reconnaît par appartenance à ce petit
+        # référentiel d'IBAN connus (config figée côté factor dans la
+        # réalité), pas par un champ sur le paiement lui-même.
+        "_technical_ibans": pd.DataFrame({"iban": technical_ibans}),
     }

@@ -68,9 +68,8 @@ def build_journal(tables: dict[str, pd.DataFrame]) -> list[Event]:
     events += _events_from_records(
         tables["debtor"].to_dict("records"), "PARTY_OPENED", "opened_at", ("party_id",)
     )
-    events += _events_from_records(
-        tables["debtor"].to_dict("records"), "PARTY_CLOSED", "closed_at", ("party_id",)
-    )
+    # Pas de PARTY_CLOSED pour debtor : la table n'a pas de `closed_at`
+    # (schéma réel) — un débiteur n'est jamais formellement fermé.
     events += _events_from_records(
         tables["assignor"].to_dict("records"), "PARTY_OPENED", "opened_at", ("party_id",)
     )
